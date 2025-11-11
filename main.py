@@ -2,15 +2,15 @@ import open3d as o3d
 import numpy as np
 import os
 
-# ---------- Settings ----------
+# ========== Settings ==========
 path = r"C:\Users\alibi\Documents\Gears Examples\2025_01_22_Kronenrad CT Messung_Ausgerichtet nach neuem Vorgehen.stl"
-target_triangles = 80_000  # simplify to this many faces if mesh is denser
+target_triangles = 80_000
 plane_z = 0.2
 circle_radius = 2.49
-circle_segments = 128
-trim_keep_inside = False  # False = keep outside, True = keep inside
+circle_center = np.array([0.0, 0.0, plane_z])
+tolerance = 1e-6
 
-# ---------- Load ----------
+# ========== Load and Clean Mesh ==========
 if not os.path.exists(path):
     raise FileNotFoundError(f"File not found: {path}")
 
@@ -18,176 +18,275 @@ mesh = o3d.io.read_triangle_mesh(path)
 if mesh.is_empty() or len(mesh.triangles) == 0:
     raise RuntimeError("Loaded mesh is empty or has no triangles.")
 
-# ---------- Cleanup & normals ----------
 mesh.remove_duplicated_vertices()
 mesh.remove_degenerate_triangles()
-mesh.remove_duplicated_triangles()
 mesh.remove_unreferenced_vertices()
-mesh.remove_non_manifold_edges()
 mesh.compute_vertex_normals()
 
-# ---------- Optional decimation for speed ----------
 if len(mesh.triangles) > target_triangles:
     mesh = mesh.simplify_quadric_decimation(target_triangles)
 
-# ---------- Axis helper (scaled to bbox size) ----------
-bbox = mesh.get_axis_aligned_bounding_box()
-diag = float(np.max(bbox.get_extent())) if not mesh.is_empty() else 1.0
-axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1 * diag, origin=[0, 0, 0])
+# ========== Helper Functions ==========
+def create_axis(bbox):
+    """Create coordinate axis with transformations."""
+    diag = bbox.get_extent().max()
+    axis_size = 0.1 * diag if diag > 0 else 1.0
+    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=axis_size, origin=[0, 0, 0])
+    
+    # Combine transformations: flip Z and swap X/Y
+    transform = np.eye(4)
+    transform[2, 2] = -1.0  # Flip Z
+    transform[0, 0] = 0.0   # Swap X/Y
+    transform[1, 1] = 0.0
+    transform[0, 1] = 1.0
+    transform[1, 0] = 1.0
+    axis.transform(transform)
+    return axis
 
-# ---------- Visual aid plane & circle (at z = plane_z) ----------
-xy_extent = max(bbox.get_extent()[0], bbox.get_extent()[1]) if diag > 0 else 1.0
-half = 0.6 * xy_extent
-
-plane = o3d.geometry.TriangleMesh(
-    vertices=o3d.utility.Vector3dVector([
-        [-half, -half, plane_z],
-        [ half, -half, plane_z],
-        [ half,  half, plane_z],
-        [-half,  half, plane_z],
-    ]),
-    triangles=o3d.utility.Vector3iVector([[0,1,2],[0,2,3]])
-)
-plane.compute_triangle_normals()
-plane.paint_uniform_color([0.7, 1.0, 0.7])
-
-theta = np.linspace(0, 2*np.pi, circle_segments, endpoint=False)
-circle_pts = np.c_[circle_radius*np.cos(theta), circle_radius*np.sin(theta), np.full_like(theta, plane_z)]
-circle = o3d.geometry.LineSet(
-    points=o3d.utility.Vector3dVector(circle_pts),
-    lines=o3d.utility.Vector2iVector([[i, (i+1) % circle_segments] for i in range(circle_segments)])
-)
-circle.colors = o3d.utility.Vector3dVector([[0.1, 0.1, 0.1]] * circle_segments)
-
-# ---------- Intersection using Open3D (core simplification!) ----------
-# Directly compute the mesh–plane intersection as a LineSet
-# (origin on plane, normal along +Z)
-plane_origin = np.array([0.0, 0.0, plane_z], dtype=float)
-plane_normal = np.array([0.0, 0.0, 1.0], dtype=float)
-section_ls = mesh.section(plane_origin=plane_origin, plane_normal=plane_normal)  # Open3D does the heavy lifting
-
-# If nothing intersects, bail early
-if section_ls is None or len(section_ls.lines) == 0:
-    print("No intersection with the plane.")
-    o3d.visualization.draw_geometries([mesh, axis, plane, circle])
-    raise SystemExit
-
-section_ls.paint_uniform_color([0.0, 0.3, 1.0])
-
-# ---------- Trim section lines against a circle on the same plane ----------
-def trim_line_set_by_circle(line_set: o3d.geometry.LineSet,
-                            center_xyz: np.ndarray,
-                            radius: float,
-                            keep_inside: bool = False,
-                            eps: float = 1e-12) -> o3d.geometry.LineSet | None:
-    """
-    Clip each 3D line segment (lying on z = center_xyz[2]) by a circle on that plane.
-    keep_inside=False keeps only portions with r >= radius (outside the circle).
-    keep_inside=True keeps only portions with r <= radius (inside the circle).
-    """
-    P = np.asarray(line_set.points)
-    L = np.asarray(line_set.lines, dtype=int)
-
-    Cxy = center_xyz[:2].astype(float)
-    Z = center_xyz[2]
-
-    out_pts = []
-    out_lines = []
-
-    def inside(p):
-        # distance in XY to center
-        return np.hypot(p[0]-Cxy[0], p[1]-Cxy[1]) <= radius + eps
-
-    def clip_segment(p0, p1):
-        """Return 0, 1, or 2 point segments after clipping against circle."""
-        i0, i1 = inside(p0), inside(p1)
-
-        # Parametric form in XY
-        d = p1 - p0
-        dxy = d[:2]
-        a = np.dot(dxy, dxy)
-        if a < eps:
-            # Degenerate tiny segment: keep/discard as a point pair
-            return [] if (keep_inside ^ i0) else [(p0, p1)]
-
-        # Solve (p0_xy + t*dxy - Cxy)^2 = r^2
-        f = (p0[:2] - Cxy)
-        b = 2.0 * np.dot(f, dxy)
-        c = np.dot(f, f) - radius**2
-        disc = b*b - 4*a*c
-
-        if disc < 0:
-            # No intersection with circle boundary
-            keep = (i0 and i1) if keep_inside else not (i0 and i1)
-            return [(p0, p1)] if keep else []
-
-        t_sqrt = np.sqrt(disc)
-        t1 = (-b - t_sqrt) / (2*a)
-        t2 = (-b + t_sqrt) / (2*a)
-
-        ts = sorted([t1, t2])
-        # classify segment intervals vs circle
-        # segments are [0, min(1, t1)], [max(0, t1), min(1, t2)], [max(0, t2), 1]
-        candidates = []
-        intervals = [(0.0, ts[0]), (ts[0], ts[1]), (ts[1], 1.0)]
-        for lo, hi in intervals:
-            lo = max(0.0, lo)
-            hi = min(1.0, hi)
-            if hi - lo <= 1e-9:
-                continue
-            # midpoint test
-            mid = 0.5*(lo+hi)
-            pm = p0 + mid * d
-            mid_inside = inside(pm)
-            keep = mid_inside if keep_inside else (not mid_inside)
-            if keep:
-                candidates.append((p0 + lo*d, p0 + hi*d))
-        return candidates
-
-    for (i, j) in L:
-        p0, p1 = P[i], P[j]
-        # enforce plane z (robust to tiny noise)
-        p0 = p0.copy(); p1 = p1.copy()
-        p0[2] = Z; p1[2] = Z
-
-        parts = clip_segment(p0, p1)
-        for seg in parts:
-            a, b = seg
-            base = len(out_pts)
-            out_pts.extend([a, b])
-            out_lines.append([base, base+1])
-
-    if not out_lines:
-        return None
-
-    trimmed = o3d.geometry.LineSet(
-        points=o3d.utility.Vector3dVector(np.asarray(out_pts)),
-        lines=o3d.utility.Vector2iVector(np.asarray(out_lines, dtype=int))
+def create_plane(bbox, z=plane_z):
+    """Create a plane mesh at z."""
+    extent = bbox.get_extent()
+    plane_half = 0.6 * max(extent[0], extent[1]) if max(extent[0], extent[1]) > 0 else 1.0
+    
+    vertices = np.array([
+        [-plane_half, -plane_half, z],
+        [ plane_half, -plane_half, z],
+        [ plane_half,  plane_half, z],
+        [-plane_half,  plane_half, z],
+    ])
+    triangles = np.array([[0, 1, 2], [0, 2, 3]])
+    
+    plane = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(vertices),
+        triangles=o3d.utility.Vector3iVector(triangles)
     )
-    trimmed.paint_uniform_color([1.0, 0.0, 0.0])
-    return trimmed
+    plane.compute_vertex_normals()
+    plane.paint_uniform_color([0.7, 1.0, 0.7])
+    return plane
 
-trimmed_ls = trim_line_set_by_circle(section_ls, np.array([0.0, 0.0, plane_z]), circle_radius, keep_inside=trim_keep_inside)
+def create_circle(radius, z=plane_z, num_segments=128):
+    """Create a circle LineSet on the plane."""
+    angles = np.linspace(0, 2 * np.pi, num_segments, endpoint=False)
+    points = np.column_stack([
+        radius * np.cos(angles),
+        radius * np.sin(angles),
+        np.full(num_segments, z)
+    ])
+    lines = np.column_stack([np.arange(num_segments), (np.arange(num_segments) + 1) % num_segments])
+    
+    circle = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(points),
+        lines=o3d.utility.Vector2iVector(lines)
+    )
+    circle.paint_uniform_color([0.1, 0.1, 0.1])
+    return circle
 
-# ---------- Report ----------
-n_lines = len(section_ls.lines)
-print(f"Intersection line segments on z={plane_z}: {n_lines}")
-if trimmed_ls is not None:
-    print(f"After trimming by circle (keep_inside={trim_keep_inside}): {len(trimmed_ls.lines)} segments")
+def extract_plane_intersection(mesh, plane_z, tolerance=1e-6):
+    """Extract intersection contours between mesh and plane."""
+    vertices = np.asarray(mesh.vertices)
+    triangles = np.asarray(mesh.triangles)
+    
+    # Collect intersection segments
+    segments = []
+    for tri in triangles:
+        v = vertices[tri]
+        z = v[:, 2]
+        
+        # Find edges crossing the plane
+        edges = []
+        for i in range(3):
+            j = (i + 1) % 3
+            if (z[i] <= plane_z + tolerance and z[j] >= plane_z - tolerance) or \
+               (z[i] >= plane_z - tolerance and z[j] <= plane_z + tolerance):
+                if abs(z[i] - z[j]) > tolerance:
+                    t = (plane_z - z[i]) / (z[j] - z[i])
+                    point = v[i] + t * (v[j] - v[i])
+                    edges.append(point)
+        
+        if len(edges) == 2:
+            segments.append((edges[0], edges[1]))
+    
+    if not segments:
+        return None, []
+    
+    # Connect segments into contours
+    def points_equal(p1, p2):
+        return np.linalg.norm(p1 - p2) < tolerance
+    
+    used = set()
+    contours = []
+    
+    for i, (p0, p1) in enumerate(segments):
+        if i in used:
+            continue
+        
+        contour = [p0.copy(), p1.copy()]
+        used.add(i)
+        
+        # Extend contour forward and backward
+        for direction in [1, -1]:
+            while True:
+                last_point = contour[-1] if direction == 1 else contour[0]
+                found = False
+                
+                for j, (s0, s1) in enumerate(segments):
+                    if j in used:
+                        continue
+                    
+                    if points_equal(last_point, s0):
+                        other = s1
+                        used.add(j)
+                        found = True
+                    elif points_equal(last_point, s1):
+                        other = s0
+                        used.add(j)
+                        found = True
+                    else:
+                        continue
+                    
+                    if direction == 1:
+                        contour.append(other.copy())
+                    else:
+                        contour.insert(0, other.copy())
+                    break
+                
+                if not found:
+                    break
+        
+        contours.append(np.array(contour))
+    
+    # Convert to LineSet
+    all_points = np.vstack(contours) if contours else np.empty((0, 3))
+    all_lines = []
+    idx = 0
+    for contour in contours:
+        for i in range(len(contour) - 1):
+            all_lines.append([idx + i, idx + i + 1])
+        idx += len(contour)
+    
+    if len(all_points) == 0:
+        return None, []
+    
+    line_set = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(all_points),
+        lines=o3d.utility.Vector2iVector(all_lines)
+    )
+    return line_set, contours
 
-# ---------- View ----------
-geoms = [mesh, axis, plane, circle, section_ls]
-if trimmed_ls is not None:
-    geoms.append(trimmed_ls)
+def trim_contours_by_circle(contours, center, radius, keep_inside=False, tolerance=1e-6):
+    """Trim contours by removing portions inside/outside the circle."""
+    if not contours:
+        return [], None
+    
+    center_xy = center[:2]
+    
+    def is_inside(p):
+        return np.linalg.norm(p[:2] - center_xy) <= radius
+    
+    def circle_intersection(p0, p1):
+        """Find intersection point between line segment and circle."""
+        d = p1[:2] - p0[:2]
+        diff = p0[:2] - center_xy
+        a = np.dot(d, d)
+        b = 2 * np.dot(diff, d)
+        c = np.dot(diff, diff) - radius**2
+        
+        disc = b**2 - 4 * a * c
+        if disc < 0 or a < 1e-10:
+            return None
+        
+        sqrt_disc = np.sqrt(disc)
+        t1, t2 = (-b - sqrt_disc) / (2 * a), (-b + sqrt_disc) / (2 * a)
+        t = next((t for t in [t1, t2] if 0 <= t <= 1), None)
+        return p0 + t * (p1 - p0) if t is not None else None
+    
+    trimmed_contours = []
+    all_points = []
+    all_lines = []
+    idx = 0
+    
+    for contour in contours:
+        if len(contour) < 2:
+            continue
+        
+        trimmed = []
+        for i in range(len(contour) - 1):
+            p0, p1 = contour[i], contour[i + 1]
+            inside0, inside1 = is_inside(p0), is_inside(p1)
+            
+            # Segment crosses circle boundary
+            if inside0 != inside1:
+                p_intersect = circle_intersection(p0, p1)
+                if p_intersect is not None:
+                    if keep_inside:
+                        trimmed.extend([p0, p_intersect] if inside0 else [p_intersect, p1])
+                    else:
+                        trimmed.extend([p_intersect, p1] if inside0 else [p0, p_intersect])
+            # Both points on same side
+            elif (keep_inside and inside0 and inside1) or (not keep_inside and not (inside0 and inside1)):
+                if not trimmed or not np.allclose(trimmed[-1], p0, atol=tolerance):
+                    trimmed.append(p0)
+                trimmed.append(p1)
+        
+        if len(trimmed) >= 2:
+            trimmed = np.array(trimmed)
+            trimmed_contours.append(trimmed)
+            
+            start_idx = idx
+            all_points.extend(trimmed)
+            for i in range(len(trimmed) - 1):
+                all_lines.append([start_idx + i, start_idx + i + 1])
+            idx += len(trimmed)
+    
+    if not all_points:
+        return trimmed_contours, None
+    
+    line_set = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(np.array(all_points)),
+        lines=o3d.utility.Vector2iVector(all_lines)
+    )
+    line_set.paint_uniform_color([1.0, 0.0, 0.0])
+    return trimmed_contours, line_set
 
+# ========== Create Visualization Objects ==========
+bbox = mesh.get_axis_aligned_bounding_box()
+axis = create_axis(bbox)
+plane = create_plane(bbox)
+circle = create_circle(circle_radius)
+
+# ========== Extract and Trim Contours ==========
+intersection_lines, contours = extract_plane_intersection(mesh, plane_z, tolerance)
+print(f"Extracted {len(contours)} contours from plane intersection")
+
+trimmed_contours, trimmed_lines = trim_contours_by_circle(
+    contours, circle_center, circle_radius, keep_inside=False, tolerance=tolerance
+)
+
+if trimmed_lines is not None:
+    print(f"After trimming: {len(trimmed_contours)} contours remain")
+    print(f"Total line segments: {len(trimmed_lines.lines)}")
+    print("\nContour details:")
+    for i, c in enumerate(trimmed_contours):
+        print(f"  Contour {i+1}: {len(c)} points")
+
+# ========== Interactive Visualization ==========
+# Prepare geometries
+geometries = [mesh, axis, plane, circle]
+
+if intersection_lines is not None:
+    intersection_lines.paint_uniform_color([0.0, 0.0, 1.0])
+    geometries.append(intersection_lines)
+
+if trimmed_lines is not None:
+    geometries.append(trimmed_lines)
+
+
+# Use built-in interactive visualizer
 o3d.visualization.draw_geometries(
-    geoms,
-    window_name="Open3D Mesh Viewer",
+    [g for g in geometries if g is not None],
+    window_name="Open3D Mesh Viewer - Interactive",
     width=1600,
     height=1000,
-    left=50,
-    top=50,
-    point_show_normal=False,
-    mesh_show_wireframe=False,
-    mesh_show_back_face=True
+    mesh_show_back_face=True,
+    mesh_show_wireframe=False
 )
