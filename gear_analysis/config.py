@@ -1,13 +1,11 @@
 """
 Configuration module for gear analysis.
 
-This module defines the AnalysisConfig dataclass that encapsulates all
-configuration parameters for the gear analysis pipeline.
+Parameters automatically scale based on gear size (r_inner, r_outer).
 """
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -15,162 +13,93 @@ from typing import Optional
 
 @dataclass
 class AnalysisConfig:
-    """Configuration parameters for gear analysis.
+    """Configuration parameters for gear flank analysis.
     
-    All parameters that control the analysis pipeline are encapsulated here,
-    making the analysis fully configurable, reproducible, and testable.
-    
-    Attributes:
-        mesh_path: Path to the input STL mesh file
-        output_dir: Directory for output files (JSON, plots)
-        target_triangles: Target triangle count for mesh simplification
-        slice_z: Z-coordinate of the horizontal slicing plane
-        slice_interpolation_density: Maximum distance between interpolated points
-        r_inner: Inner radius bound for point filtering
-        r_outer: Outer radius bound for point filtering
-        n_teeth: Expected number of teeth in the gear
-        min_points_per_cluster: Minimum points for a valid tooth cluster
-        min_points_per_flank: Minimum points needed for flank line fitting
-        flank_segment_length: Visual length of flank lines in plots
-        bisector_length: Visual length of bisector lines in plots
-        parallel_threshold: Threshold for detecting parallel bisectors
-        intersection_r_min_factor: Factor of r_inner for minimum intersection radius
-        intersection_r_max_factor: Factor of r_outer for maximum intersection radius
-        ransac_min_samples: Minimum samples for RANSAC circle fitting
-        ransac_residual_threshold: Maximum residual for RANSAC inliers
-        ransac_iterations: Number of RANSAC iterations
-        gear_center_method: Method for gear center estimation
-    
-    Example:
-        >>> config = AnalysisConfig(
-        ...     mesh_path=Path("gear.stl"),
-        ...     slice_z=-0.2,
-        ...     r_inner=2.38,
-        ...     r_outer=2.58,
-        ...     n_teeth=38
-        ... )
-        >>> config.intersection_r_min
-        0.119
+    Set r_inner and r_outer for YOUR gear - other parameters scale automatically.
     """
     
-    # File paths
+    # === INPUT/OUTPUT ===
     mesh_path: Path = field(default_factory=lambda: Path("gear.stl"))
     output_dir: Path = field(default_factory=lambda: Path("results"))
     
-    # Mesh processing
-    target_triangles: int = 1_000_000
-    
-    # Slice extraction
+    # === GEAR GEOMETRY (SET THESE FOR YOUR GEAR) ===
     slice_z: float = -0.2
+    r_inner: float = 2.46
+    r_outer: float = 2.68
+    n_teeth: int = 38
+    
+    # === MESH PROCESSING ===
+    target_triangles: int = 1_000_000
     slice_interpolation_density: float = 0.002
     
-    # Radius filtering
-    r_inner: float = 2.38
-    r_outer: float = 2.58
-    
-    # Tooth detection
-    n_teeth: int = 38
+    # === CLUSTERING ===
     min_points_per_cluster: int = 5
     min_points_per_flank: int = 5
     
-    # Visualization
-    flank_segment_length: float = 0.5
-    bisector_length: float = 5.0
+    # === VISUALIZATION (auto-scaled if None) ===
+    flank_segment_length: Optional[float] = None
+    bisector_length: Optional[float] = None
     
-    # Bisector intersection filtering
+    # === BISECTOR/INTERSECTION ===
     parallel_threshold: float = 0.05
-    intersection_r_min_factor: float = 0.05
-    intersection_r_max_factor: float = 0.5
     
-    # RANSAC parameters
+    # === RANSAC ===
     ransac_min_samples: int = 3
-    ransac_residual_threshold: float = 0.05
-    ransac_iterations: int = 100
+    ransac_residual_threshold: float = 0.003  # Works well for most gear sizes
+    ransac_iterations: int = 200
     
-    # Gear center estimation
-    gear_center_method: str = "outer_tips"  # or "boundary_centroid"
+    # === INTERSECTION FILTERING (auto-computed from r_inner/r_outer) ===
+    intersection_r_min: Optional[float] = None
+    intersection_r_max: Optional[float] = None
     
-    def __post_init__(self) -> None:
-        """Validate configuration after initialization."""
-        if self.r_inner >= self.r_outer:
-            raise ValueError(f"r_inner ({self.r_inner}) must be less than r_outer ({self.r_outer})")
-        if self.n_teeth < 1:
-            raise ValueError(f"n_teeth must be positive, got {self.n_teeth}")
-        if self.gear_center_method not in ("outer_tips", "boundary_centroid"):
-            raise ValueError(f"Invalid gear_center_method: {self.gear_center_method}")
+    # === GEAR CENTER ===
+    gear_center_method: str = "outer_tips"
     
-    @property
-    def intersection_r_min(self) -> float:
-        """Minimum radius for valid bisector intersections."""
-        return self.r_inner * self.intersection_r_min_factor
-    
-    @property
-    def intersection_r_max(self) -> float:
-        """Maximum radius for valid bisector intersections."""
-        return self.r_outer * self.intersection_r_max_factor
-    
-    @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> "AnalysisConfig":
-        """Create configuration from command line arguments.
+    def __post_init__(self):
+        """Compute derived/scaled values after initialization."""
+        if isinstance(self.mesh_path, str):
+            self.mesh_path = Path(self.mesh_path)
+        if isinstance(self.output_dir, str):
+            self.output_dir = Path(self.output_dir)
         
-        Args:
-            args: Parsed command line arguments
-            
-        Returns:
-            AnalysisConfig instance
-        """
-        return cls(
-            mesh_path=Path(args.stl),
-            output_dir=Path(args.outdir),
-            slice_z=args.z_tip * args.units_scale,
-            r_inner=args.r_inner * args.units_scale,
-            r_outer=args.r_outer * args.units_scale,
-            n_teeth=args.n_teeth,
-            gear_center_method=args.gear_center_method,
-        )
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "AnalysisConfig":
-        """Create configuration from a dictionary.
+        # Auto-scale visualization lengths based on gear size
+        gear_radius = (self.r_inner + self.r_outer) / 2
         
-        Args:
-            data: Dictionary of configuration parameters
-            
-        Returns:
-            AnalysisConfig instance
-        """
-        # Convert string paths to Path objects
-        if "mesh_path" in data and isinstance(data["mesh_path"], str):
-            data["mesh_path"] = Path(data["mesh_path"])
-        if "output_dir" in data and isinstance(data["output_dir"], str):
-            data["output_dir"] = Path(data["output_dir"])
+        if self.flank_segment_length is None:
+            self.flank_segment_length = gear_radius * 0.2  # 20% of radius
         
-        return cls(**data)
+        if self.bisector_length is None:
+            self.bisector_length = gear_radius * 2.0  # 200% of radius
+        
+        # Intersection bounds (same formula as original code):
+        # r_min = R_INNER * 0.05
+        # r_max = R_OUTER * 0.5
+        if self.intersection_r_min is None:
+            self.intersection_r_min = self.r_inner * 0.01
+        
+        if self.intersection_r_max is None:
+            self.intersection_r_max = self.r_outer * 0.1
     
     def to_dict(self) -> dict:
-        """Convert configuration to a dictionary.
-        
-        Returns:
-            Dictionary representation of the configuration
-        """
+        """Convert config to dictionary for serialization."""
         return {
             "mesh_path": str(self.mesh_path),
             "output_dir": str(self.output_dir),
-            "target_triangles": self.target_triangles,
             "slice_z": self.slice_z,
-            "slice_interpolation_density": self.slice_interpolation_density,
             "r_inner": self.r_inner,
             "r_outer": self.r_outer,
             "n_teeth": self.n_teeth,
+            "target_triangles": self.target_triangles,
+            "slice_interpolation_density": self.slice_interpolation_density,
             "min_points_per_cluster": self.min_points_per_cluster,
             "min_points_per_flank": self.min_points_per_flank,
             "flank_segment_length": self.flank_segment_length,
             "bisector_length": self.bisector_length,
             "parallel_threshold": self.parallel_threshold,
-            "intersection_r_min_factor": self.intersection_r_min_factor,
-            "intersection_r_max_factor": self.intersection_r_max_factor,
             "ransac_min_samples": self.ransac_min_samples,
             "ransac_residual_threshold": self.ransac_residual_threshold,
             "ransac_iterations": self.ransac_iterations,
+            "intersection_r_min": self.intersection_r_min,
+            "intersection_r_max": self.intersection_r_max,
             "gear_center_method": self.gear_center_method,
         }

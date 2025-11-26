@@ -11,23 +11,23 @@ def main():
     # ========== CONFIGURE YOUR ANALYSIS HERE ==========
     config = AnalysisConfig(
         # Input file - UPDATE THIS PATH
-        mesh_path=Path(r"C:\Users\alibi\Documents\Gears Examples\2025_01_22_Kronenrad CT Messung_Ausgerichtet nach neuem Vorgehen.stl"),
+        mesh_path=Path(r"C:\Users\alibi\Documents\Gears Examples\SimRes\DOE_207_AG.stl"),
         
         # Output directory
         output_dir=Path("results"),
         
         # Slice parameters
-        slice_z=0.2,
+        slice_z=-0.2,
         
         # Radius filtering (adjust based on your gear)
-        r_inner=2.48,
-        r_outer=2.64,
+        r_inner=2.46,
+        r_outer=2.68,
         
         # Gear parameters
         n_teeth=19,
         
         # Optional: mesh simplification
-        target_triangles=1_000_000,
+        target_triangles=100_000_000,
     )
     # ==================================================
     

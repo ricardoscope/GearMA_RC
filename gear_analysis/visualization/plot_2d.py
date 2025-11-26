@@ -219,19 +219,6 @@ def plot_2d_analysis(
     if result.ghost_circle is not None:
         gc = result.ghost_circle
         
-        # Plot inlier intersection points
-        if len(gc.inliers) > 0:
-            ax.scatter(
-                gc.inliers[:, 0],
-                gc.inliers[:, 1],
-                s=50,
-                marker='o',
-                linewidths=2,
-                facecolors='none',
-                edgecolors='blue',
-                label=f'Inlier intersections ({len(gc.inliers)})'
-            )
-        
         # Plot ghost circle
         circle_x = gc.center[0] + gc.radius * np.cos(theta)
         circle_y = gc.center[1] + gc.radius * np.sin(theta)

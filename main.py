@@ -15,17 +15,17 @@ from scipy.optimize import least_squares
 # ==================== Configuration ====================
 MESH_PATH = Path(
     #r"C:\Users\alibi\Documents\Gears Examples\2025_01_22_Kronenrad CT Messung_Ausgerichtet nach neuem Vorgehen.stl"
-    r"C:\Users\alibi\Documents\Gears Examples\SimRes\DOE_170_AG.stl"
+    r"C:\Users\alibi\Documents\Gears Examples\SimRes\crown_gear_final_X_4.stl"
 )
 TARGET_TRIANGLES = 10_000_000  # Target triangle count for mesh simplification eg.500_000, 1000_000, 2000_000
-SLICE_Z = -0.2  # Z-height where gear slice is extracted eg. 0.2, 0.3, 0.4
-R_INNER = 2.5  # Inner radius for point filtering
-R_OUTER = 2.7 # Outer radius for point filtering eg. 2.46, 2.56, 2.66
+SLICE_Z = -2.0  # Z-height where gear slice is extracted eg. 0.2, 0.3, 0.4
+R_INNER = 20.43 # Inner radius for point filtering
+R_OUTER = 24.68 # Outer radius for point filtering eg. 2.46, 2.56, 2.66
 OUTPUT_JSON = Path("flank_lines.json")
 SLICE_INTERPOLATION_DENSITY = 0.002  # Max distance between interpolated points eg. 0.002, 0.003, 0.004
-FLANK_SEGMENT_LENGTH = 0.5  # Visual length of flank lines eg. 0.50, 0.60, 0.70
-BISECTOR_LENGTH = 5.0  # Visual length of bisector lines eg. 5.0, 6.0, 7.0
-N_TEETH = 38  # Expected number of teeth in gear eg. 38, 39, 40
+FLANK_SEGMENT_LENGTH = 6.0  # Visual length of flank lines eg. 0.50, 0.60, 0.70
+BISECTOR_LENGTH = 23.0  # Visual length of bisector lines eg. 5.0, 6.0, 7.0
+N_TEETH = 19  # Expected number of teeth in gear eg. 38, 39, 40
 MIN_POINTS_PER_CLUSTER = 5  # Minimum points to consider a cluster valid eg. 6, 7, 8
 MIN_POINTS_PER_FLANK = 5  # Minimum points needed to fit a flank line eg. 5, 6, 7
 PARALLEL_THRESHOLD = 0.05  # Skip bisector pairs with angle difference below ~5%
@@ -53,6 +53,28 @@ class FlankLine:
 
 
 @dataclass
+class ToothFlanks:
+    """Contains both flanks of a single tooth.
+    
+    Attributes:
+        tooth: Tooth number (1-indexed)
+        left_point: Centroid of left flank points
+        left_direction: Direction vector of left flank
+        left_n_points: Number of points in left flank
+        right_point: Centroid of right flank points
+        right_direction: Direction vector of right flank
+        right_n_points: Number of points in right flank
+    """
+    tooth: int
+    left_point: np.ndarray
+    left_direction: np.ndarray
+    left_n_points: int
+    right_point: np.ndarray
+    right_direction: np.ndarray
+    right_n_points: int
+
+
+@dataclass
 class PairBisector:
     """Represents the angle bisector between two adjacent tooth flanks.
     
@@ -63,6 +85,24 @@ class PairBisector:
         length: Visual length for rendering
     """
     between_teeth: tuple[int, int]
+    origin: np.ndarray
+    direction: np.ndarray
+    length: float
+
+
+@dataclass
+class ToothBisector:
+    """Represents the angle bisector between left and right flanks of a SINGLE tooth.
+    
+    This bisector should point toward the gear center for a well-manufactured gear.
+    
+    Attributes:
+        tooth: Tooth number (1-indexed)
+        origin: 2D midpoint between the two flank centroids
+        direction: 2D unit vector of the bisector direction (pointing inward)
+        length: Visual length for rendering
+    """
+    tooth: int
     origin: np.ndarray
     direction: np.ndarray
     length: float
@@ -400,6 +440,42 @@ def fit_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return centroid, direction
 
 
+def extract_left_flank(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Extract and fit a line to the left flank of a tooth cluster.
+    
+    Strategy:
+    1. Calculate cluster center and local coordinate system
+    2. Split points into left/right based on tangential projection
+    3. Fit line to left-side points only
+    
+    Args:
+        points: 2D points belonging to one tooth (N, 2)
+        
+    Returns:
+        Tuple of (flank_centroid, flank_direction)
+    """
+    center = points.mean(axis=0)
+    
+    # Define local radial and tangential directions
+    radial = unit_vector(center) if np.linalg.norm(center) > 1e-10 else np.array([1.0, 0.0])
+    tangential = np.array([-radial[1], radial[0]])  # 90° rotation
+    
+    # Project points onto tangential axis and split at median
+    projections = (points - center) @ tangential
+    median = np.median(projections)
+    left = points[projections < median]
+    
+    # Fallback: ensure enough points for fitting
+    if len(left) < MIN_POINTS_PER_FLANK:
+        order = np.argsort(projections)
+        half = max(MIN_POINTS_PER_FLANK, len(points) // 2)
+        left = points[order[:half]]
+        if len(left) < 3:
+            raise ValueError("Insufficient points for flank fitting.")
+    
+    return fit_line(left)
+
+
 def extract_right_flank(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Extract and fit a line to the right flank of a tooth cluster.
     
@@ -434,6 +510,70 @@ def extract_right_flank(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             raise ValueError("Insufficient points for flank fitting.")
     
     return fit_line(right)
+
+
+def extract_both_flanks(points: np.ndarray, tooth_number: int) -> Optional[ToothFlanks]:
+    """Extract and fit lines to BOTH flanks of a tooth cluster.
+    
+    This is the key method for proper ghost circle analysis.
+    It extracts left and right flanks from the same tooth cluster.
+    
+    Args:
+        points: 2D points belonging to one tooth (N, 2)
+        tooth_number: Tooth index (1-indexed)
+        
+    Returns:
+        ToothFlanks object containing both flanks, or None if fitting fails
+    """
+    if len(points) < 2 * MIN_POINTS_PER_FLANK:
+        print(f"  Warning: Tooth {tooth_number}: Not enough points ({len(points)}) for both flanks")
+        return None
+    
+    center = points.mean(axis=0)
+    
+    # Define local coordinate system
+    radial = unit_vector(center) if np.linalg.norm(center) > 1e-10 else np.array([1.0, 0.0])
+    tangential = np.array([-radial[1], radial[0]])  # 90° counterclockwise
+    
+    # Project points onto tangential axis
+    projections = (points - center) @ tangential
+    median = np.median(projections)
+    
+    # Split into left and right
+    left_mask = projections < median
+    right_mask = projections > median
+    
+    left_points = points[left_mask]
+    right_points = points[right_mask]
+    
+    # Fallback: ensure enough points for each flank
+    if len(left_points) < MIN_POINTS_PER_FLANK:
+        order = np.argsort(projections)
+        half = max(MIN_POINTS_PER_FLANK, len(points) // 2)
+        left_points = points[order[:half]]
+    
+    if len(right_points) < MIN_POINTS_PER_FLANK:
+        order = np.argsort(projections)
+        half = max(MIN_POINTS_PER_FLANK, len(points) // 2)
+        right_points = points[order[-half:]]
+    
+    # Fit both flanks
+    try:
+        left_point, left_direction = fit_line(left_points)
+        right_point, right_direction = fit_line(right_points)
+        
+        return ToothFlanks(
+            tooth=tooth_number,
+            left_point=left_point,
+            left_direction=unit_vector(left_direction),
+            left_n_points=len(left_points),
+            right_point=right_point,
+            right_direction=unit_vector(right_direction),
+            right_n_points=len(right_points),
+        )
+    except ValueError as e:
+        print(f"  Warning: Tooth {tooth_number}: Failed to fit both flanks: {e}")
+        return None
 
 
 # ==================== Bisector Computation ====================
@@ -471,6 +611,45 @@ def compute_bisector(
         bisector_dir = unit_vector(origin) if np.linalg.norm(origin) > 1e-10 else dir_a
     
     return origin, bisector_dir
+
+
+def compute_tooth_bisectors(tooth_flanks_list: list[ToothFlanks], length: float) -> list[ToothBisector]:
+    """Compute bisectors between left and right flanks of EACH tooth.
+    
+    This is the primary method for ghost circle analysis. Each tooth
+    produces one bisector that should point toward the gear center.
+    
+    Args:
+        tooth_flanks_list: List of ToothFlanks objects (one per tooth)
+        length: Visual length for bisector rendering
+        
+    Returns:
+        List of ToothBisector objects (one per tooth)
+    """
+    bisectors = []
+    
+    for tooth_flanks in tooth_flanks_list:
+        # Compute bisector between left and right flank of this tooth
+        origin, direction = compute_bisector(
+            tooth_flanks.left_point, tooth_flanks.left_direction,
+            tooth_flanks.right_point, tooth_flanks.right_direction
+        )
+        
+        # Ensure direction points INWARD (toward gear center, i.e., toward origin)
+        # The origin of the bisector should be near the tooth tip
+        # Direction should point toward (0, 0)
+        if np.dot(direction, origin) > 0:
+            # Direction points outward, flip it
+            direction = -direction
+        
+        bisectors.append(ToothBisector(
+            tooth=tooth_flanks.tooth,
+            origin=origin,
+            direction=unit_vector(direction),
+            length=length,
+        ))
+    
+    return bisectors
 
 
 def compute_pair_bisectors(flanks: list[FlankLine], length: float) -> list[PairBisector]:
@@ -933,11 +1112,18 @@ def line_circle_intersections(origin: np.ndarray, direction: np.ndarray, radius:
         return np.vstack([p2, p1])
 
 
-def bisector_display_segment(bisector: PairBisector) -> tuple[np.ndarray, np.ndarray]:
-    """Return start/end points for displaying a bisector line.
-
-    Starts near the flank midpoint (between teeth) and extends toward the gear
-    center for a fixed length, ensuring we don't draw past the outer circle.
+def bisector_display_segment(bisector) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate start/end points for displaying a bisector line.
+    
+    Works with both PairBisector and ToothBisector objects.
+    The bisector is drawn from near the flank midpoint toward
+    the gear center for a fixed length, ensuring we don't draw past the outer circle.
+    
+    Args:
+        bisector: PairBisector or ToothBisector object
+        
+    Returns:
+        Tuple of (start_point, end_point) as 2D arrays
     """
     direction = unit_vector(bisector.direction)
     if np.linalg.norm(direction) < 1e-10:
@@ -963,7 +1149,7 @@ def build_visual_geometries(result: AnalysisResult) -> list[o3d.geometry.Geometr
     """Build all visualization geometries from analysis results.
     
     Creates:
-    - Original mesh
+    - Original mesh (silver/metallic with proper shading)
     - Coordinate frame
     - Slice point cloud (gray)
     - Reference circles (inner/outer radii)
@@ -971,10 +1157,22 @@ def build_visual_geometries(result: AnalysisResult) -> list[o3d.geometry.Geometr
     - Bisector lines (black)
     - Red sphere marker for tooth 1
     """
-    geometries = [
-        result.mesh,
-        o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0]),
-    ]
+    geometries = []
+    
+    # Add mesh with proper shading and silver/metallic color
+    if result.mesh is not None:
+        mesh = o3d.geometry.TriangleMesh(result.mesh)
+        # Compute normals for proper shading
+        mesh.compute_vertex_normals()
+        mesh.compute_triangle_normals()
+        # Silver/metallic color (light gray with slight blue tint)
+        mesh.paint_uniform_color([0.75, 0.75, 0.8])
+        geometries.append(mesh)
+    
+    # Add coordinate frame
+    geometries.append(
+        o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+    )
     
     # Add slice points as gray point cloud
     slice_pc = o3d.geometry.PointCloud()
@@ -990,7 +1188,7 @@ def build_visual_geometries(result: AnalysisResult) -> list[o3d.geometry.Geometr
         make_circle(R_OUTER, SLICE_Z, (0.1, 0.6, 0.9)),  # Blue outer circle
     ])
     
-    # Add flank lines
+    # Add RIGHT flank lines (from result.flanks - for backward compatibility)
     for flank in result.flanks:
         center_3d = to_3d(flank.point, SLICE_Z)
         direction_3d = np.append(flank.direction, 0.0)
@@ -1005,14 +1203,36 @@ def build_visual_geometries(result: AnalysisResult) -> list[o3d.geometry.Geometr
             sphere.paint_uniform_color([1.0, 0.0, 0.0])  # Red sphere
             geometries.append(sphere)
         else:
-            geometries.append(make_lineset(start, end, (0.1, 0.8, 0.2)))  # Green lines
+            geometries.append(make_lineset(start, end, (0.0, 0.8, 0.0)))  # Green lines
     
-    # Add bisector lines extended to the outer radius
-    for bisector in result.bisectors:
-        start_2d, end_2d = bisector_display_segment(bisector)
-        start_3d = to_3d(start_2d, SLICE_Z)
-        end_3d = to_3d(end_2d, SLICE_Z)
-        geometries.append(make_lineset(start_3d, end_3d, (0.0, 0.0, 0.0)))  # Black lines
+    # Add LEFT flank lines (from result.tooth_flanks if available)
+    if hasattr(result, 'tooth_flanks') and result.tooth_flanks:
+        for tf in result.tooth_flanks:
+            left_point_3d = to_3d(tf.left_point, SLICE_Z)
+            left_direction_3d = np.append(tf.left_direction, 0.0)
+            start = left_point_3d - FLANK_SEGMENT_LENGTH * left_direction_3d
+            end = left_point_3d + FLANK_SEGMENT_LENGTH * left_direction_3d
+            
+            if tf.tooth == 1:
+                geometries.append(make_lineset(start, end, (1.0, 0.0, 1.0)))  # Magenta for tooth 1
+            else:
+                geometries.append(make_lineset(start, end, (0.0, 1.0, 1.0)))  # Cyan for others
+    
+    # Add bisector lines (prefer tooth bisectors if available)
+    if hasattr(result, 'tooth_bisectors') and result.tooth_bisectors:
+        # Use tooth bisectors (between left and right flanks of same tooth)
+        for bisector in result.tooth_bisectors:
+            start_2d, end_2d = bisector_display_segment(bisector)
+            start_3d = to_3d(start_2d, SLICE_Z)
+            end_3d = to_3d(end_2d, SLICE_Z)
+            geometries.append(make_lineset(start_3d, end_3d, (0.0, 0.0, 0.0)))  # Black lines
+    else:
+        # Fallback to pair bisectors for backward compatibility
+        for bisector in result.bisectors:
+            start_2d, end_2d = bisector_display_segment(bisector)
+            start_3d = to_3d(start_2d, SLICE_Z)
+            end_3d = to_3d(end_2d, SLICE_Z)
+            geometries.append(make_lineset(start_3d, end_3d, (0.0, 0.0, 0.0)))  # Black lines
     
     return geometries
 
@@ -1048,24 +1268,45 @@ def plot_2d_analysis(result: AnalysisResult, output_path: Optional[Path] = None)
     ax.plot(R_OUTER * np.cos(theta), R_OUTER * np.sin(theta),
             '--', linewidth=1.5, label=f'Outer radius ({R_OUTER})')
     
-    # Plot flank lines
+    # Plot RIGHT flank lines (from result.flanks - for backward compatibility)
     for flank in result.flanks:
         start = flank.point - FLANK_SEGMENT_LENGTH * flank.direction
         end = flank.point + FLANK_SEGMENT_LENGTH * flank.direction
         
         if flank.tooth == 1:
             ax.plot([start[0], end[0]], [start[1], end[1]],
-                   linewidth=2, label='Tooth 1 flank' if flank.tooth == 1 else '')
+                   'r-', linewidth=2, label='Tooth 1 right flank')
         else:
             ax.plot([start[0], end[0]], [start[1], end[1]],
-                   linewidth=1, alpha=0.7)
+                   'g-', linewidth=1, alpha=0.7)
     
-    # Plot bisectors
-    for i, bisector in enumerate(result.bisectors):
-        start, end = bisector_display_segment(bisector)
-        ax.plot([start[0], end[0]], [start[1], end[1]],
-               'k-', linewidth=1, alpha=0.6,
-               label='Bisectors' if i == 0 else '')
+    # Plot LEFT flank lines (from result.tooth_flanks if available)
+    if hasattr(result, 'tooth_flanks') and result.tooth_flanks:
+        for tf in result.tooth_flanks:
+            start = tf.left_point - FLANK_SEGMENT_LENGTH * tf.left_direction
+            end = tf.left_point + FLANK_SEGMENT_LENGTH * tf.left_direction
+            
+            if tf.tooth == 1:
+                ax.plot([start[0], end[0]], [start[1], end[1]],
+                       'm-', linewidth=2, label='Tooth 1 left flank')
+            else:
+                ax.plot([start[0], end[0]], [start[1], end[1]],
+                       'c-', linewidth=1, alpha=0.7)
+    
+    # Plot tooth bisectors (between left and right flanks of same tooth)
+    if hasattr(result, 'tooth_bisectors') and result.tooth_bisectors:
+        for i, bisector in enumerate(result.tooth_bisectors):
+            start, end = bisector_display_segment(bisector)
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                   'k-', linewidth=1, alpha=0.6,
+                   label='Tooth bisectors' if i == 0 else '')
+    else:
+        # Fallback to pair bisectors for backward compatibility
+        for i, bisector in enumerate(result.bisectors):
+            start, end = bisector_display_segment(bisector)
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                   'k-', linewidth=1, alpha=0.6,
+                   label='Pair bisectors' if i == 0 else '')
     
     # Plot ghost circle analysis if available
     if result.ghost_circle is not None:
@@ -1206,31 +1447,39 @@ def analyse_gear_slice() -> AnalysisResult:
     non_empty = sum(1 for c in tooth_clusters if len(c) > 0)
     print(f"  Found {non_empty} / {N_TEETH} non-empty clusters")
     
-    # Fit flank lines
-    print("Fitting flank lines...")
-    flanks = []
+    # Fit BOTH flanks for each tooth
+    print("Fitting both flanks for each tooth...")
+    tooth_flanks_list = []
+    flanks = []  # Keep for backward compatibility (right flanks only)
+    
     for idx, cluster in enumerate(tooth_clusters, start=1):
         if len(cluster) == 0:
             continue  # Skip empty clusters
-        try:
-            point, direction = extract_right_flank(cluster)
+        
+        # Extract both flanks from the same tooth
+        tooth_flanks = extract_both_flanks(cluster, idx)
+        if tooth_flanks is not None:
+            tooth_flanks_list.append(tooth_flanks)
+            # Also add right flank to flanks list for backward compatibility
             flanks.append(FlankLine(
                 tooth=idx,
-                point=point,
-                direction=unit_vector(direction),
+                point=tooth_flanks.right_point,
+                direction=tooth_flanks.right_direction,
                 cluster_size=len(cluster),
             ))
-        except ValueError as e:
-            print(f"  Warning: Skipping tooth {idx}: {e}")
-            continue
     
-    if not flanks:
+    if not tooth_flanks_list:
         raise RuntimeError("Unable to fit flanks for any tooth.")
-    print(f"  Successfully fitted {len(flanks)} flank lines")
+    print(f"  Successfully fitted both flanks for {len(tooth_flanks_list)} teeth")
     
-    # Compute bisectors
+    # Compute tooth bisectors (between left and right flanks of SAME tooth)
+    print("Computing tooth bisectors...")
+    tooth_bisectors = compute_tooth_bisectors(tooth_flanks_list, BISECTOR_LENGTH)
+    print(f"  Computed {len(tooth_bisectors)} tooth bisectors")
+    
+    # Also compute pair bisectors for backward compatibility
     bisectors = compute_pair_bisectors(flanks, BISECTOR_LENGTH)
-    print(f"  Computed {len(bisectors)} pair bisectors")
+    print(f"  Computed {len(bisectors)} pair bisectors (for backward compatibility)")
     
     # Compute bisector intersections and fit ghost circle
     print("\n--- Ghost Circle Analysis ---")
@@ -1238,7 +1487,19 @@ def analyse_gear_slice() -> AnalysisResult:
     r_max = R_OUTER * INTERSECTION_R_MAX_FACTOR
     print(f"Computing bisector intersections in radius range [{r_min:.3f}, {r_max:.3f}]...")
     
-    intersections = compute_bisector_intersections(bisectors, r_min, r_max)
+    # Use tooth bisectors for ghost circle analysis (more accurate)
+    # Convert ToothBisector to PairBisector format for intersection computation
+    bisectors_for_intersection = [
+        PairBisector(
+            between_teeth=(b.tooth, b.tooth),  # Same tooth (left-right bisector)
+            origin=b.origin,
+            direction=b.direction,
+            length=b.length
+        )
+        for b in tooth_bisectors
+    ]
+    
+    intersections = compute_bisector_intersections(bisectors_for_intersection, r_min, r_max)
     print(f"  Found {len(intersections)} valid intersections")
     
     ghost_circle = None
@@ -1304,7 +1565,7 @@ def analyse_gear_slice() -> AnalysisResult:
         print(f"  Offset angle: {angle_deg:.2f}° from +X axis")
         print(f"  Offset vector: ({offset_vector[0]:.6f}, {offset_vector[1]:.6f})")
     
-    return AnalysisResult(
+    result = AnalysisResult(
         mesh=mesh,
         slice_points=slice_points,
         filtered_points=filtered_points,
@@ -1315,6 +1576,12 @@ def analyse_gear_slice() -> AnalysisResult:
         gear_center=gear_center,
         offset_analysis=offset_analysis,
     )
+    
+    # Attach tooth_flanks and tooth_bisectors as additional attributes
+    result.tooth_flanks = tooth_flanks_list
+    result.tooth_bisectors = tooth_bisectors
+    
+    return result
 
 
 # ==================== I/O ====================
@@ -1506,13 +1773,31 @@ def run_analysis_from_cli() -> None:
     if not args.no_viz:
         print("Launching 3D viewer...")
         geometries = build_visual_geometries(result)
-        o3d.visualization.draw_geometries(
-            geometries,
+        
+        # Create visualizer with render options for better shading
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(
             window_name="Gear Tooth Flank Analysis",
             width=1600,
             height=1000,
-            mesh_show_back_face=True,
+            visible=True
         )
+        
+        # Add all geometries
+        for geom in geometries:
+            vis.add_geometry(geom)
+        
+        # Configure render options for better shading
+        render_opt = vis.get_render_option()
+        render_opt.background_color = np.array([1.0, 1.0, 1.0])  # White background
+        render_opt.light_on = True
+        render_opt.point_size = 6.0
+        render_opt.line_width = 3.0
+        render_opt.mesh_show_back_face = True
+        
+        # Run visualization
+        vis.run()
+        vis.destroy_window()
 
 
 # ==================== Main ====================
@@ -1562,13 +1847,31 @@ def main() -> None:
     # Launch 3D visualization
     print("Launching 3D viewer...")
     geometries = build_visual_geometries(result)
-    o3d.visualization.draw_geometries(
-        geometries,
+    
+    # Create visualizer with render options for better shading
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(
         window_name="Gear Tooth Flank Analysis",
         width=1600,
         height=1000,
-        mesh_show_back_face=True,
+        visible=True
     )
+    
+    # Add all geometries
+    for geom in geometries:
+        vis.add_geometry(geom)
+    
+    # Configure render options for better shading
+    render_opt = vis.get_render_option()
+    render_opt.background_color = np.array([1.0, 1.0, 1.0])  # White background
+    render_opt.light_on = True
+    render_opt.point_size = 6.0
+    render_opt.line_width = 3.0
+    render_opt.mesh_show_back_face = True
+    
+    # Run visualization
+    vis.run()
+    vis.destroy_window()
 
 
 if __name__ == "__main__":
