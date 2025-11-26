@@ -14,18 +14,19 @@ from scipy.optimize import least_squares
 
 # ==================== Configuration ====================
 MESH_PATH = Path(
-    r"C:\Users\alibi\Documents\Gears Examples\2025_01_22_Kronenrad CT Messung_Ausgerichtet nach neuem Vorgehen.stl"
+    #r"C:\Users\alibi\Documents\Gears Examples\2025_01_22_Kronenrad CT Messung_Ausgerichtet nach neuem Vorgehen.stl"
+    r"C:\Users\alibi\Documents\Gears Examples\SimRes\DOE_170_AG.stl"
 )
-TARGET_TRIANGLES = 1000_000  # Target triangle count for mesh simplification eg.500_000, 1000_000, 2000_000
-SLICE_Z = 0.2  # Z-height where gear slice is extracted eg. 0.2, 0.3, 0.4
-R_INNER = 2.46  # Inner radius for point filtering
-R_OUTER = 2.66  # Outer radius for point filtering eg. 2.46, 2.56, 2.66
+TARGET_TRIANGLES = 10_000_000  # Target triangle count for mesh simplification eg.500_000, 1000_000, 2000_000
+SLICE_Z = -0.2  # Z-height where gear slice is extracted eg. 0.2, 0.3, 0.4
+R_INNER = 2.5  # Inner radius for point filtering
+R_OUTER = 2.7 # Outer radius for point filtering eg. 2.46, 2.56, 2.66
 OUTPUT_JSON = Path("flank_lines.json")
 SLICE_INTERPOLATION_DENSITY = 0.002  # Max distance between interpolated points eg. 0.002, 0.003, 0.004
-FLANK_SEGMENT_LENGTH = 0.50  # Visual length of flank lines eg. 0.50, 0.60, 0.70
+FLANK_SEGMENT_LENGTH = 0.5  # Visual length of flank lines eg. 0.50, 0.60, 0.70
 BISECTOR_LENGTH = 5.0  # Visual length of bisector lines eg. 5.0, 6.0, 7.0
 N_TEETH = 38  # Expected number of teeth in gear eg. 38, 39, 40
-MIN_POINTS_PER_CLUSTER = 6  # Minimum points to consider a cluster valid eg. 6, 7, 8
+MIN_POINTS_PER_CLUSTER = 5  # Minimum points to consider a cluster valid eg. 6, 7, 8
 MIN_POINTS_PER_FLANK = 5  # Minimum points needed to fit a flank line eg. 5, 6, 7
 PARALLEL_THRESHOLD = 0.05  # Skip bisector pairs with angle difference below ~5%
 RANSAC_MIN_SAMPLES = 3  # Minimum points to define a circle
@@ -305,10 +306,25 @@ def filter_by_radius(points: np.ndarray, r_inner: float, r_outer: float) -> np.n
         mask = (radii >= relaxed_inner) & (radii <= relaxed_outer)
         filtered = points[mask]
         if len(filtered) == 0:
-            raise RuntimeError(
+            # Provide diagnostic information about actual radius distribution
+            r_min = float(np.min(radii)) if len(radii) > 0 else 0.0
+            r_max = float(np.max(radii)) if len(radii) > 0 else 0.0
+            r_mean = float(np.mean(radii)) if len(radii) > 0 else 0.0
+            r_median = float(np.median(radii)) if len(radii) > 0 else 0.0
+            r_p25 = float(np.percentile(radii, 25)) if len(radii) > 0 else 0.0
+            r_p75 = float(np.percentile(radii, 75)) if len(radii) > 0 else 0.0
+            
+            error_msg = (
                 f"No points found within radii {r_inner:.2f}-{r_outer:.2f} "
-                f"(relaxed: {relaxed_inner:.2f}-{relaxed_outer:.2f})"
+                f"(relaxed: {relaxed_inner:.2f}-{relaxed_outer:.2f})\n"
+                f"  Actual radius distribution in slice:\n"
+                f"    Min: {r_min:.4f}, Max: {r_max:.4f}\n"
+                f"    Mean: {r_mean:.4f}, Median: {r_median:.4f}\n"
+                f"    25th percentile: {r_p25:.4f}, 75th percentile: {r_p75:.4f}\n"
+                f"  Suggested values based on percentiles:\n"
+                f"    R_INNER ≈ {r_p25:.4f}, R_OUTER ≈ {r_p75:.4f}"
             )
+            raise RuntimeError(error_msg)
         print(f"  Warning: Using relaxed radii: {relaxed_inner:.2f}-{relaxed_outer:.2f}")
     
     return filtered
@@ -877,6 +893,72 @@ def make_circle(radius: float, z: float, color: tuple[float, float, float], segm
     return circle
 
 
+def line_circle_intersections(origin: np.ndarray, direction: np.ndarray, radius: float) -> Optional[np.ndarray]:
+    """Return the two intersection points of a line with a centered circle.
+    
+    Args:
+        origin: Point on the line (2D)
+        direction: Line direction vector (2D)
+        radius: Circle radius
+        
+    Returns:
+        Array [[p_min], [p_max]] of intersection points, or None if no intersection.
+    """
+    if radius <= 0:
+        return None
+    
+    d = unit_vector(direction)
+    if np.linalg.norm(d) < 1e-10:
+        return None
+    
+    a = np.dot(d, d)
+    b = 2.0 * np.dot(origin, d)
+    c = np.dot(origin, origin) - radius**2
+    discriminant = b**2 - 4 * a * c
+    
+    if discriminant <= 0:
+        return None
+    
+    sqrt_disc = np.sqrt(discriminant)
+    t1 = (-b - sqrt_disc) / (2 * a)
+    t2 = (-b + sqrt_disc) / (2 * a)
+    if t1 == t2:
+        return None
+    
+    p1 = origin + t1 * d
+    p2 = origin + t2 * d
+    if t1 < t2:
+        return np.vstack([p1, p2])
+    else:
+        return np.vstack([p2, p1])
+
+
+def bisector_display_segment(bisector: PairBisector) -> tuple[np.ndarray, np.ndarray]:
+    """Return start/end points for displaying a bisector line.
+
+    Starts near the flank midpoint (between teeth) and extends toward the gear
+    center for a fixed length, ensuring we don't draw past the outer circle.
+    """
+    direction = unit_vector(bisector.direction)
+    if np.linalg.norm(direction) < 1e-10:
+        direction = np.array([1.0, 0.0])
+
+    # Ensure direction points inward toward the center (reduce radius)
+    if np.dot(direction, bisector.origin) > 0:
+        direction = -direction
+
+    start = bisector.origin.copy()
+    start_radius = np.linalg.norm(start)
+    if start_radius > R_OUTER:
+        intersections = line_circle_intersections(bisector.origin, direction, R_OUTER)
+        if intersections is not None:
+            distances = np.linalg.norm(intersections - bisector.origin, axis=1)
+            start = intersections[np.argmin(distances)]
+
+    end = start + direction * bisector.length
+    return start, end
+
+
 def build_visual_geometries(result: AnalysisResult) -> list[o3d.geometry.Geometry]:
     """Build all visualization geometries from analysis results.
     
@@ -925,13 +1007,12 @@ def build_visual_geometries(result: AnalysisResult) -> list[o3d.geometry.Geometr
         else:
             geometries.append(make_lineset(start, end, (0.1, 0.8, 0.2)))  # Green lines
     
-    # Add bisector lines
+    # Add bisector lines extended to the outer radius
     for bisector in result.bisectors:
-        origin_3d = to_3d(bisector.origin, SLICE_Z)
-        direction_3d = np.append(bisector.direction, 0.0)
-        start = origin_3d - 0.5 * bisector.length * direction_3d
-        end = origin_3d + 0.5 * bisector.length * direction_3d
-        geometries.append(make_lineset(start, end, (0.0, 0.0, 0.0)))  # Black lines
+        start_2d, end_2d = bisector_display_segment(bisector)
+        start_3d = to_3d(start_2d, SLICE_Z)
+        end_3d = to_3d(end_2d, SLICE_Z)
+        geometries.append(make_lineset(start_3d, end_3d, (0.0, 0.0, 0.0)))  # Black lines
     
     return geometries
 
@@ -948,6 +1029,7 @@ def plot_2d_analysis(result: AnalysisResult, output_path: Optional[Path] = None)
     - Ghost circle
     - Gear center and ghost circle center
     - Offset vector
+    - Radius annotations
     """
     fig, ax = plt.subplots(figsize=(12, 12))
     
@@ -980,8 +1062,7 @@ def plot_2d_analysis(result: AnalysisResult, output_path: Optional[Path] = None)
     
     # Plot bisectors
     for i, bisector in enumerate(result.bisectors):
-        start = bisector.origin - 0.5 * bisector.length * bisector.direction
-        end = bisector.origin + 0.5 * bisector.length * bisector.direction
+        start, end = bisector_display_segment(bisector)
         ax.plot([start[0], end[0]], [start[1], end[1]],
                'k-', linewidth=1, alpha=0.6,
                label='Bisectors' if i == 0 else '')
@@ -989,22 +1070,29 @@ def plot_2d_analysis(result: AnalysisResult, output_path: Optional[Path] = None)
     # Plot ghost circle analysis if available
     if result.ghost_circle is not None:
         gc = result.ghost_circle
-        
+
         # Plot intersection points
-        if len(gc.outliers) > 0:
-            ax.scatter(gc.outliers[:, 0], gc.outliers[:, 1],
-                      s=30, marker='x', linewidths=2,
-                      label=f'Outlier intersections ({len(gc.outliers)})')
-        
         if len(gc.inliers) > 0:
-            ax.scatter(gc.inliers[:, 0], gc.inliers[:, 1],
-                      s=50, marker='o', linewidths=2, facecolors='none',
-                      label=f'Inlier intersections ({len(gc.inliers)})')
-        
+            ax.scatter(
+                gc.inliers[:, 0],
+                gc.inliers[:, 1],
+                s=50,
+                marker="o",
+                linewidths=2,
+                facecolors="none",
+                label=f"Inlier intersections ({len(gc.inliers)})",
+            )
+
         # Plot ghost circle
-        circle_points = gc.center[:, None] + gc.radius * np.array([np.cos(theta), np.sin(theta)])
-        ax.plot(circle_points[0], circle_points[1],
-               linewidth=2.5, label=f'Ghost circle (r={gc.radius:.3f}, RMSE={gc.rmse:.4f})')
+        circle_points = gc.center[:, None] + gc.radius * np.array(
+            [np.cos(theta), np.sin(theta)]
+        )
+        ax.plot(
+            circle_points[0],
+            circle_points[1],
+            linewidth=2.5,
+            label=f"Ghost circle (r={gc.radius:.3f}, RMSE={gc.rmse:.4f})",
+        )
         ax.annotate(
             f"r = {gc.radius:.3f}",
             xy=(gc.center[0] + gc.radius, gc.center[1]),
@@ -1017,11 +1105,29 @@ def plot_2d_analysis(result: AnalysisResult, output_path: Optional[Path] = None)
             arrowprops=dict(arrowstyle="->", linewidth=1, color="#0b5394"),
             bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8),
         )
-        
-        # Plot ghost circle center
-        ax.scatter([gc.center[0]], [gc.center[1]],
-                  s=100, marker='+', linewidths=3,
-                  label='Ghost circle center')
+
+        # Plot ghost circle center marker
+        ax.scatter(
+            [gc.center[0]],
+            [gc.center[1]],
+            s=100,
+            marker="+",
+            linewidths=3,
+            label="Ghost circle center",
+        )
+    else:
+        # Preview hint when no ghost circle is available
+        ax.text(
+            0.02,
+            0.98,
+            "Ghost circle not available\n(too few bisectors / intersections)",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            color="red",
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8),
+        )
     
     # Plot gear center and offset if available
     if result.gear_center is not None and result.offset_analysis is not None:
@@ -1029,9 +1135,9 @@ def plot_2d_analysis(result: AnalysisResult, output_path: Optional[Path] = None)
         offset = result.offset_analysis
         
         # Plot gear center
-        ax.scatter([gc_center[0]], [gc_center[1]],
-                  s=100, marker='x', linewidths=3,
-                  label=f'Gear center ({result.gear_center.method})')
+       # ax.scatter([gc_center[0]], [gc_center[1]],
+                #  s=100, marker='x', linewidths=3,
+                #  label=f'Gear center ({result.gear_center.method})')
         
         # Plot offset vector
         ax.arrow(gc_center[0], gc_center[1],
