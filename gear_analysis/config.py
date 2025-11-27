@@ -46,7 +46,7 @@ class AnalysisConfig:
     # === RANSAC ===
     ransac_min_samples: int = 3
     ransac_residual_threshold: float = 0.003  # Works well for most gear sizes
-    ransac_iterations: int = 200
+    ransac_iterations: int = 300
     
     # === INTERSECTION FILTERING (auto-computed from r_inner/r_outer) ===
     intersection_r_min: Optional[float] = None
@@ -78,7 +78,7 @@ class AnalysisConfig:
             self.intersection_r_min = self.r_inner * 0.01
         
         if self.intersection_r_max is None:
-            self.intersection_r_max = self.r_outer * 0.1
+            self.intersection_r_max = self.r_outer * 0.05
     
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
