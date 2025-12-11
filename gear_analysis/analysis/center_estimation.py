@@ -13,6 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from gear_analysis.geometry.circle_fitting import CircleFitter
+from gear_analysis.utils import compute_radii
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class GearCenterEstimator:
             return np.zeros(2), r_outer
         
         # Select points near outer radius
-        radii = np.linalg.norm(filtered_points, axis=1)
+        radii = compute_radii(filtered_points)
         outer_threshold = r_outer * 0.95
         outer_points = filtered_points[radii >= outer_threshold]
         
@@ -122,7 +123,7 @@ class GearCenterEstimator:
             return np.zeros(2), r_outer
         
         # Compute radial distances
-        radii = np.linalg.norm(slice_points, axis=1)
+        radii = compute_radii(slice_points)
         
         # Avoid division by zero for points at origin
         radii[radii < 1e-10] = 1.0

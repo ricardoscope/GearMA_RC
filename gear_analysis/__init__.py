@@ -5,6 +5,11 @@ This package provides tools for analyzing crown gear geometry to detect
 manufacturing setup errors by computing the "ghost circle" formed by
 bisector intersections.
 
+New in this version:
+- Surface normal extraction for enhanced validation
+- Automatic flagging of inconsistent flanks
+- Validation summary in results
+
 Example usage:
     from gear_analysis import AnalysisConfig, GearAnalyzer
     
@@ -13,16 +18,21 @@ Example usage:
         slice_z=-0.2,
         r_inner=2.38,
         r_outer=2.58,
-        n_teeth=38
+        n_teeth=38,
+        use_surface_normals=True  # Enable validation
     )
     
     analyzer = GearAnalyzer(config)
     result = analyzer.run()
     
     print(f"Ghost circle radius: {result.ghost_circle.radius}")
+    
+    # Check validation results
+    if result.validation_summary:
+        print(f"Flagged teeth: {result.validation_summary.flagged_teeth}")
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "Gear Analysis Team"
 
 # Public API
@@ -35,10 +45,19 @@ from gear_analysis.models import (
     OffsetAnalysis,
     AnalysisResult,
 )
-from gear_analysis.analysis.pipeline import GearAnalyzer
+from gear_analysis.analysis.pipeline import GearAnalyzer, ExtendedAnalysisResult, ValidationSummary
 from gear_analysis.io.export import ResultExporter
 from gear_analysis.visualization.plot_2d import plot_2d_analysis
 from gear_analysis.visualization.view_3d import build_3d_geometries
+
+# New exports for normal-based analysis
+from gear_analysis.mesh.slicing import SliceData
+from gear_analysis.geometry.line_fitting import (
+    ToothFlanks,
+    FlankValidation,
+    FlankSide,
+    summarize_validation_results,
+)
 
 __all__ = [
     # Configuration
@@ -52,6 +71,15 @@ __all__ = [
     "AnalysisResult",
     # Analysis
     "GearAnalyzer",
+    "ExtendedAnalysisResult",
+    "ValidationSummary",
+    # Slice data
+    "SliceData",
+    # Flank validation
+    "ToothFlanks",
+    "FlankValidation",
+    "FlankSide",
+    "summarize_validation_results",
     # I/O
     "ResultExporter",
     # Visualization

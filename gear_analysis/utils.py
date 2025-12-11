@@ -149,3 +149,141 @@ def perpendicular_2d(v: Vector2D, clockwise: bool = False) -> Vector2D:
         return np.array([v[1], -v[0]])
     else:
         return np.array([-v[1], v[0]])
+
+
+def normalize_angle(angles: FloatArray) -> FloatArray:
+    """Normalize angles to [0, 2π) range.
+    
+    Args:
+        angles: Array of angles in radians (any range)
+        
+    Returns:
+        Normalized angles in [0, 2π) range
+    
+    Example:
+        >>> normalize_angle(np.array([-np.pi, 0, np.pi, 3*np.pi]))
+        array([3.14159265, 0.        , 3.14159265, 3.14159265])
+    """
+    return (angles + 2 * np.pi) % (2 * np.pi)
+
+
+def normalize_angle_diff(angle_diff: FloatArray) -> FloatArray:
+    """Normalize angle differences to [-π, π] range.
+    
+    Args:
+        angle_diff: Array of angle differences in radians
+        
+    Returns:
+        Normalized angle differences in [-π, π] range
+    
+    Example:
+        >>> normalize_angle_diff(np.array([3*np.pi/2, -3*np.pi/2]))
+        array([-1.57079633,  1.57079633])
+    """
+    return np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
+
+
+def compute_radii(points: NDArray) -> FloatArray:
+    """Compute radial distances from origin for 2D points.
+    
+    Args:
+        points: Array of 2D points, shape (N, 2)
+        
+    Returns:
+        Array of radii, shape (N,)
+    
+    Example:
+        >>> points = np.array([[3.0, 4.0], [0.0, 5.0]])
+        >>> compute_radii(points)
+        array([5., 5.])
+    """
+    return np.linalg.norm(points, axis=1)
+
+
+def compute_angles(points: NDArray) -> FloatArray:
+    """Compute polar angles for 2D points.
+    
+    Args:
+        points: Array of 2D points, shape (N, 2)
+        
+    Returns:
+        Array of angles in radians [-π, π], shape (N,)
+    
+    Example:
+        >>> points = np.array([[1.0, 0.0], [0.0, 1.0]])
+        >>> compute_angles(points)
+        array([0.        , 1.57079633])
+    """
+    return np.arctan2(points[:, 1], points[:, 0])
+
+
+def fit_line_svd(points: NDArray) -> tuple[Vector2D, Vector2D]:
+    """Fit a line to points using SVD.
+    
+    Args:
+        points: Array of 2D points, shape (N, 2)
+        
+    Returns:
+        Tuple of (centroid, direction) where direction is a unit vector
+    
+    Example:
+        >>> points = np.array([[0, 0], [1, 1], [2, 2]])
+        >>> centroid, direction = fit_line_svd(points)
+        >>> np.allclose(direction, [0.70710678, 0.70710678])
+        True
+    """
+    if len(points) < 2:
+        raise ValueError("Need at least 2 points to fit a line")
+    
+    centroid = points.mean(axis=0)
+    centered = points - centroid
+    
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    direction = unit_vector(vt[0])
+    
+    return centroid, direction
+
+
+def orient_direction_outward(direction: Vector2D, point: Vector2D) -> Vector2D:
+    """Orient a direction vector to point outward (positive radial component).
+    
+    Args:
+        direction: Direction vector to orient
+        point: Reference point (typically centroid of points on the line)
+        
+    Returns:
+        Direction vector oriented to point outward
+    
+    Example:
+        >>> dir_in = np.array([-0.707, -0.707])  # Pointing inward
+        >>> point = np.array([1.0, 0.0])
+        >>> dir_out = orient_direction_outward(dir_in, point)
+        >>> np.dot(dir_out, point) > 0  # Now pointing outward
+        True
+    """
+    radial = unit_vector(point) if np.linalg.norm(point) > 1e-10 else np.array([1.0, 0.0])
+    if np.dot(direction, radial) < 0:
+        return -direction
+    return direction
+
+
+def orient_direction_inward(direction: Vector2D, point: Vector2D) -> Vector2D:
+    """Orient a direction vector to point inward (negative radial component).
+    
+    Args:
+        direction: Direction vector to orient
+        point: Reference point (typically origin of bisector)
+        
+    Returns:
+        Direction vector oriented to point inward (toward origin)
+    
+    Example:
+        >>> dir_out = np.array([0.707, 0.707])  # Pointing outward
+        >>> point = np.array([1.0, 0.0])
+        >>> dir_in = orient_direction_inward(dir_out, point)
+        >>> np.dot(dir_in, point) < 0  # Now pointing inward
+        True
+    """
+    if np.dot(direction, point) > 0:
+        return -direction
+    return direction

@@ -15,7 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from gear_analysis.models import FlankLine, PairBisector
-from gear_analysis.utils import unit_vector
+from gear_analysis.utils import unit_vector, compute_radii, orient_direction_inward
 
 if TYPE_CHECKING:
     from gear_analysis.geometry.line_fitting import ToothFlanks
@@ -160,11 +160,7 @@ class BisectorComputer:
             )
             
             # Ensure direction points INWARD (toward gear center, i.e., toward origin)
-            # The origin of the bisector should be near the tooth tip
-            # Direction should point toward (0, 0)
-            if np.dot(direction, origin) > 0:
-                # Direction points outward, flip it
-                direction = -direction
+            direction = orient_direction_inward(direction, origin)
             
             bisectors.append(ToothBisector(
                 tooth=tooth_flanks.tooth,
@@ -347,32 +343,27 @@ class IntersectionFinder:
         return p1 + t * d1
     
     @classmethod
-    def compute_bisector_intersections(
+    def _compute_intersections_generic(
         cls,
-        bisectors: list[PairBisector],
+        bisectors: list,
         r_min: float,
         r_max: float,
-        parallel_threshold: float = 0.05
+        parallel_threshold: float = 0.05,
+        log_level: str = "debug"
     ) -> list[Vector2D]:
-        """Compute pairwise intersections of bisectors near the center.
+        """Generic method to compute pairwise intersections of bisector-like objects.
         
-        Intersects all bisector pairs and filters results to keep only
-        intersections within a specified radius range from the origin.
+        Works with any objects that have 'origin' and 'direction' attributes.
         
         Args:
-            bisectors: List of bisector lines
+            bisectors: List of bisector objects (PairBisector or ToothBisector)
             r_min: Minimum radius for valid intersections
             r_max: Maximum radius for valid intersections
-            parallel_threshold: Skip pairs where |dot(d1, d2)| > (1 - threshold).
-                              Default 0.05 means skip pairs within ~5% of parallel.
+            parallel_threshold: Skip pairs where |dot(d1, d2)| > (1 - threshold)
+            log_level: Logging level ('debug' or 'info')
             
         Returns:
             List of valid intersection points as 2D arrays
-        
-        Example:
-            >>> intersections = IntersectionFinder.compute_bisector_intersections(
-            ...     bisectors, r_min=0.1, r_max=1.0
-            ... )
         """
         if len(bisectors) < 2:
             return []
@@ -401,9 +392,45 @@ class IntersectionFinder:
                     if r_min <= radius <= r_max:
                         intersections.append(point)
         
-        logger.debug(f"Found {len(intersections)} bisector intersections in radius [{r_min:.3f}, {r_max:.3f}]")
+        msg = f"Found {len(intersections)} bisector intersections in radius [{r_min:.3f}, {r_max:.3f}]"
+        if log_level == "info":
+            logger.info(msg)
+        else:
+            logger.debug(msg)
         
         return intersections
+    
+    @classmethod
+    def compute_bisector_intersections(
+        cls,
+        bisectors: list[PairBisector],
+        r_min: float,
+        r_max: float,
+        parallel_threshold: float = 0.05
+    ) -> list[Vector2D]:
+        """Compute pairwise intersections of bisectors near the center.
+        
+        Intersects all bisector pairs and filters results to keep only
+        intersections within a specified radius range from the origin.
+        
+        Args:
+            bisectors: List of bisector lines
+            r_min: Minimum radius for valid intersections
+            r_max: Maximum radius for valid intersections
+            parallel_threshold: Skip pairs where |dot(d1, d2)| > (1 - threshold).
+                              Default 0.05 means skip pairs within ~5% of parallel.
+            
+        Returns:
+            List of valid intersection points as 2D arrays
+        
+        Example:
+            >>> intersections = IntersectionFinder.compute_bisector_intersections(
+            ...     bisectors, r_min=0.1, r_max=1.0
+            ... )
+        """
+        return cls._compute_intersections_generic(
+            bisectors, r_min, r_max, parallel_threshold, log_level="debug"
+        )
     
     @classmethod
     def compute_tooth_bisector_intersections(
@@ -426,34 +453,9 @@ class IntersectionFinder:
         Returns:
             List of valid intersection points
         """
-        if len(bisectors) < 2:
-            return []
-        
-        intersections: list[Vector2D] = []
-        
-        for i in range(len(bisectors)):
-            for j in range(i + 1, len(bisectors)):
-                b1, b2 = bisectors[i], bisectors[j]
-                
-                # Skip nearly parallel bisectors
-                dot_product = abs(np.dot(b1.direction, b2.direction))
-                if dot_product > (1.0 - parallel_threshold):
-                    continue
-                
-                # Compute intersection
-                point = cls.line_intersection_2d(
-                    b1.origin, b1.direction,
-                    b2.origin, b2.direction
-                )
-                
-                if point is not None:
-                    radius = np.linalg.norm(point)
-                    if r_min <= radius <= r_max:
-                        intersections.append(point)
-        
-        logger.info(f"Found {len(intersections)} tooth bisector intersections")
-        
-        return intersections
+        return cls._compute_intersections_generic(
+            bisectors, r_min, r_max, parallel_threshold, log_level="info"
+        )
     
     @staticmethod
     def line_circle_intersection(

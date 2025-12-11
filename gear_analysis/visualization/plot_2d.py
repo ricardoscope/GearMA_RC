@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
 from numpy.typing import NDArray
 
@@ -19,6 +20,44 @@ from gear_analysis.models import AnalysisResult, PairBisector
 from gear_analysis.utils import unit_vector
 
 logger = logging.getLogger(__name__)
+
+# Font configuration for consistent styling
+# Note: For a 12x12 inch figure, fontsize 16 provides good visual proportion
+# The title should be clearly visible but not dominate the plot
+TITLE_FONT = {
+    'family': 'Arial',
+    'size': 16,
+    'weight': 'bold',
+}
+
+# Axis label font configuration
+AXIS_LABEL_FONT = {
+    'family': 'Arial', 
+    'size': 12,
+}
+
+
+def _configure_plot_fonts():
+    """Configure matplotlib to use Arial font for titles.
+    
+    This ensures consistent font rendering across PNG and SVG outputs.
+    Falls back to Helvetica or DejaVu Sans if Arial is not available.
+    
+    For SVG output, the font-family is embedded as text, so the SVG will
+    display correctly on systems that have Arial installed, even if the
+    system generating the SVG does not.
+    """
+    # Set default font family with fallbacks
+    mpl.rcParams['font.family'] = 'sans-serif'
+    mpl.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif']
+    
+    # Ensure SVG outputs use actual font names (not paths)
+    # This allows SVGs to render with Arial on systems that have it
+    mpl.rcParams['svg.fonttype'] = 'none'
+    
+    # Suppress font warnings for cleaner output
+    import warnings
+    warnings.filterwarnings('ignore', message='.*Font family.*not found.*')
 
 # Type alias
 Vector2D = NDArray[np.floating]
@@ -87,7 +126,8 @@ def plot_2d_analysis(
     figsize: tuple[int, int] = (12, 12),
     dpi: int = 150,
     show_legend: bool = True,
-    show_grid: bool = True
+    show_grid: bool = True,
+    save_svg: bool = True
 ) -> plt.Figure:
     """Create comprehensive 2D visualization of the analysis.
     
@@ -103,11 +143,13 @@ def plot_2d_analysis(
     
     Args:
         result: AnalysisResult from GearAnalyzer
-        output_path: If provided, save figure to this path
+        output_path: If provided, save figure to this path (PNG format).
+                     If save_svg is True, also saves an SVG with the same base name.
         figsize: Figure size in inches (width, height)
-        dpi: Resolution for saved figure
+        dpi: Resolution for saved PNG figure
         show_legend: Whether to show the legend
         show_grid: Whether to show grid lines
+        save_svg: If True and output_path is provided, also save as SVG
         
     Returns:
         matplotlib Figure object
@@ -115,7 +157,10 @@ def plot_2d_analysis(
     Example:
         >>> result = analyzer.run()
         >>> fig = plot_2d_analysis(result, Path("analysis.png"))
+        # This saves both analysis.png and analysis.svg
     """
+    # Configure fonts for consistent styling
+    _configure_plot_fonts()
     config = result.config
     fig, ax = plt.subplots(figsize=figsize)
     
@@ -215,11 +260,11 @@ def plot_2d_analysis(
             label='Bisectors' if i == 0 else ''
         )
     
-    # Plot ghost circle analysis
+    # Plot eccentric circle analysis
     if result.ghost_circle is not None:
         gc = result.ghost_circle
         
-        # Plot ghost circle
+        # Plot eccentric circle
         circle_x = gc.center[0] + gc.radius * np.cos(theta)
         circle_y = gc.center[1] + gc.radius * np.sin(theta)
         ax.plot(
@@ -227,7 +272,7 @@ def plot_2d_analysis(
             circle_y,
             'b-',
             linewidth=2.5,
-            label=f'Ghost circle (r={gc.radius:.3f}, RMSE={gc.rmse:.4f})'
+            label=f'Eccentric circle (r={gc.radius:.3f}, RMSE={gc.rmse:.4f})'
         )
         
         # Annotate radius
@@ -243,7 +288,7 @@ def plot_2d_analysis(
             bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8),
         )
         
-        # Plot ghost circle center
+        # Plot eccentric circle center
         ax.scatter(
             [gc.center[0]],
             [gc.center[1]],
@@ -251,7 +296,7 @@ def plot_2d_analysis(
             marker='+',
             linewidths=3,
             c='blue',
-            label='Ghost circle center'
+            label='Eccentric circle center'
         )
     
     # Plot offset vector
@@ -278,17 +323,26 @@ def plot_2d_analysis(
     if show_grid:
         ax.grid(True, alpha=0.3)
     if show_legend:
-        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=8)
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_title('Gear Flank Analysis with Ghost Circle')
+        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=10)
+    ax.set_xlabel('X', fontdict=AXIS_LABEL_FONT)
+    ax.set_ylabel('Y', fontdict=AXIS_LABEL_FONT)
+    ax.set_title('Gear Flank Analysis with Eccentric Circle', fontdict=TITLE_FONT)
     
     plt.tight_layout()
     
     # Save if output path provided
     if output_path:
+        output_path = Path(output_path)
+        
+        # Save PNG
         plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        logger.info(f"Saved 2D plot to: {output_path}")
+        logger.info(f"Saved 2D plot (PNG) to: {output_path}")
+        
+        # Save SVG if requested
+        if save_svg:
+            svg_path = output_path.with_suffix('.svg')
+            plt.savefig(svg_path, format='svg', bbox_inches='tight')
+            logger.info(f"Saved 2D plot (SVG) to: {svg_path}")
     
     return fig
 
@@ -296,18 +350,24 @@ def plot_2d_analysis(
 def plot_tooth_details(
     result: AnalysisResult,
     tooth_numbers: Optional[list[int]] = None,
-    output_path: Optional[Path] = None
+    output_path: Optional[Path] = None,
+    save_svg: bool = True
 ) -> plt.Figure:
     """Plot detailed view of specific teeth.
     
     Args:
         result: AnalysisResult from GearAnalyzer
         tooth_numbers: List of tooth numbers to show (default: first 4)
-        output_path: If provided, save figure to this path
+        output_path: If provided, save figure to this path (PNG format).
+                     If save_svg is True, also saves an SVG with the same base name.
+        save_svg: If True and output_path is provided, also save as SVG
         
     Returns:
         matplotlib Figure object
     """
+    # Configure fonts for consistent styling
+    _configure_plot_fonts()
+    
     if tooth_numbers is None:
         tooth_numbers = [1, 2, 3, 4]
     
@@ -341,10 +401,10 @@ def plot_tooth_details(
                 ax.plot([start[0], end[0]], [start[1], end[1]], 'c-', linewidth=2, label='Left')
                 ax.scatter([tf.left_point[0]], [tf.left_point[1]], s=50, c='cyan')
             
-            ax.set_title(f'Tooth {tooth_num} ({flank.cluster_size} pts)')
+            ax.set_title(f'Tooth {tooth_num} ({flank.cluster_size} pts)', fontdict=TITLE_FONT)
             ax.legend(fontsize=7)
         else:
-            ax.set_title(f'Tooth {tooth_num} (no data)')
+            ax.set_title(f'Tooth {tooth_num} (no data)', fontdict=TITLE_FONT)
         
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
@@ -352,6 +412,16 @@ def plot_tooth_details(
     plt.tight_layout()
     
     if output_path:
+        output_path = Path(output_path)
+        
+        # Save PNG
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        logger.info(f"Saved tooth details (PNG) to: {output_path}")
+        
+        # Save SVG if requested
+        if save_svg:
+            svg_path = output_path.with_suffix('.svg')
+            plt.savefig(svg_path, format='svg', bbox_inches='tight')
+            logger.info(f"Saved tooth details (SVG) to: {svg_path}")
     
     return fig

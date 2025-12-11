@@ -12,6 +12,8 @@ import logging
 import numpy as np
 from numpy.typing import NDArray
 
+from gear_analysis.utils import normalize_angle, compute_angles, compute_radii
+
 logger = logging.getLogger(__name__)
 
 # Type alias
@@ -66,7 +68,7 @@ class PointFilter:
             >>> len(filtered)
             100
         """
-        radii = np.linalg.norm(points, axis=1)
+        radii = compute_radii(points)
         mask = (radii >= r_inner) & (radii <= r_outer)
         filtered = points[mask]
         
@@ -124,9 +126,7 @@ class PointFilter:
             >>> # Keep points in the first quadrant
             >>> filtered = PointFilter.by_angle(points, 0, np.pi/2)
         """
-        angles = np.arctan2(points[:, 1], points[:, 0])
-        # Normalize to [0, 2π)
-        angles = (angles + 2 * np.pi) % (2 * np.pi)
+        angles = normalize_angle(compute_angles(points))
         
         # Handle wraparound
         if angle_min < angle_max:

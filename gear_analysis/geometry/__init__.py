@@ -14,7 +14,7 @@ from gear_analysis.geometry.clustering import ToothClusterer
 from gear_analysis.geometry.line_fitting import LineFitter
 from gear_analysis.geometry.circle_fitting import CircleFitter
 from gear_analysis.geometry.bisectors import BisectorComputer, IntersectionFinder
-
+from gear_analysis.geometry.radial_tracing import RadialFlankTracer, convert_to_tooth_flanks
 __all__ = [
     "PointFilter",
     "ToothClusterer",

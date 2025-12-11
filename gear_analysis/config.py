@@ -29,7 +29,7 @@ class AnalysisConfig:
     n_teeth: int = 38
     
     # === MESH PROCESSING ===
-    target_triangles: int = 1_000_000
+    target_triangles: int = 10_000_000
     slice_interpolation_density: float = 0.002
     
     # === CLUSTERING ===
@@ -45,8 +45,8 @@ class AnalysisConfig:
     
     # === RANSAC ===
     ransac_min_samples: int = 3
-    ransac_residual_threshold: float = 0.003  # Works well for most gear sizes
-    ransac_iterations: int = 300
+    ransac_residual_threshold: float = 0.001  # Tighter threshold for better fit
+    ransac_iterations: int = 200  # More iterations for better result
     
     # === INTERSECTION FILTERING (auto-computed from r_inner/r_outer) ===
     intersection_r_min: Optional[float] = None
@@ -54,6 +54,19 @@ class AnalysisConfig:
     
     # === GEAR CENTER ===
     gear_center_method: str = "outer_tips"
+    
+    # === NORMAL-BASED VALIDATION (NEW) ===
+    use_surface_normals: bool = True  # Extract and use surface normals for validation
+    normal_direction_threshold_deg: float = 15.0  # Max acceptable SVD/normal direction difference
+    
+    # === ROBUST FLANK CLASSIFICATION ===
+    # When True, uses surface normals as PRIMARY classifier for left/right
+    # instead of angular position. More robust but slightly slower.
+    use_normal_based_classification: bool = False
+    
+    # Threshold for normal-based classification
+    # |tangential_component| must exceed this to classify as left/right
+    normal_classification_threshold: float = 0.15
     
     def __post_init__(self):
         """Compute derived/scaled values after initialization."""
@@ -66,19 +79,19 @@ class AnalysisConfig:
         gear_radius = (self.r_inner + self.r_outer) / 2
         
         if self.flank_segment_length is None:
-            self.flank_segment_length = gear_radius * 0.2  # 20% of radius
+            self.flank_segment_length = gear_radius * 0.2
         
         if self.bisector_length is None:
-            self.bisector_length = gear_radius * 2.0  # 200% of radius
+            self.bisector_length = gear_radius * 2.0
         
-        # Intersection bounds (same formula as original code):
-        # r_min = R_INNER * 0.05
-        # r_max = R_OUTER * 0.5
+        # TIGHTER intersection bounds for more accurate circle:
+        # - r_min stays small to capture center intersections
+        # - r_max reduced from 0.5 to 0.3 to exclude outlier intersections
         if self.intersection_r_min is None:
-            self.intersection_r_min = self.r_inner * 0.01
+            self.intersection_r_min = self.r_inner * 0.02  # 2% of r_inner
         
         if self.intersection_r_max is None:
-            self.intersection_r_max = self.r_outer * 0.05
+            self.intersection_r_max = self.r_outer * 0.3   # 30% of r_outer (was 50%)
     
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
@@ -102,4 +115,6 @@ class AnalysisConfig:
             "intersection_r_min": self.intersection_r_min,
             "intersection_r_max": self.intersection_r_max,
             "gear_center_method": self.gear_center_method,
+            "use_surface_normals": self.use_surface_normals,
+            "normal_direction_threshold_deg": self.normal_direction_threshold_deg,
         }
