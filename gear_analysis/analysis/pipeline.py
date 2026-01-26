@@ -500,11 +500,28 @@ class GearAnalyzer:
         logger.info("Fitting ghost circle with RANSAC...")
         intersections_array = np.array(intersections)
         
+        # Estimate expected ghost circle radius from intersection spread
+        # Ghost circle should be small (intersections cluster near center)
+        expected_radius = None
+        if len(intersections_array) > 5:
+            # Use median distance from centroid as expected radius
+            centroid = intersections_array.mean(axis=0)
+            distances = np.linalg.norm(intersections_array - centroid, axis=1)
+            expected_radius = np.median(distances)
+            logger.info(f"  Expected ghost circle radius: {expected_radius:.4f}")
+        
+        # Use config expected_ghost_radius if set, otherwise use computed value
+        if hasattr(config, 'expected_ghost_radius') and config.expected_ghost_radius is not None:
+            expected_radius = config.expected_ghost_radius
+            logger.info(f"  Using configured expected radius: {expected_radius:.4f}")
+        
         center, radius, inliers, outliers, rmse = CircleFitter.fit_ransac(
             intersections_array,
-            config.ransac_min_samples,
-            config.ransac_residual_threshold,
-            config.ransac_iterations
+            min_samples=config.ransac_min_samples,
+            residual_threshold=config.ransac_residual_threshold,
+            max_iterations=config.ransac_iterations,
+            expected_radius=expected_radius,
+            radius_tolerance=getattr(config, 'ghost_radius_tolerance', 0.5),
         )
         
         ghost_circle = GhostCircle(

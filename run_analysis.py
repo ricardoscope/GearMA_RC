@@ -24,7 +24,7 @@ def main():
     # ========== CONFIGURE YOUR ANALYSIS HERE ==========
     config = AnalysisConfig(
         # Input file - UPDATE THIS PATH
-        mesh_path=Path(r"C:\Users\alibi\Documents\Gears Examples\SimRes\DOE_194_AG.stl"),
+        mesh_path=Path(r"C:\Users\alibi\Downloads\fixed\fixed\DOE_117_A.stl"),
         
         # Output directory
         output_dir=Path("results"),
@@ -33,7 +33,7 @@ def main():
         slice_z=-0.2,
         
         # Radius filtering (adjust based on your gear)
-        r_inner=2.46,
+        r_inner=2.52,
         r_outer=2.68,
         
         # Gear parameters

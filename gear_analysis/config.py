@@ -24,7 +24,7 @@ class AnalysisConfig:
     
     # === GEAR GEOMETRY (SET THESE FOR YOUR GEAR) ===
     slice_z: float = -0.2
-    r_inner: float = 2.46
+    r_inner: float = 2.45
     r_outer: float = 2.68
     n_teeth: int = 38
     
@@ -43,11 +43,18 @@ class AnalysisConfig:
     # === BISECTOR/INTERSECTION ===
     parallel_threshold: float = 0.05
     
-    # === RANSAC ===
+   # === RANSAC ===
     ransac_min_samples: int = 3
     ransac_residual_threshold: float = 0.001  # Tighter threshold for better fit
     ransac_iterations: int = 200  # More iterations for better result
     
+    # === GHOST CIRCLE CONSTRAINTS ===
+    # Expected radius for ghost circle (None = auto-compute from data)
+    expected_ghost_radius: Optional[float] = None
+    # Tolerance for ghost radius constraint (0.5 = ±50%)
+    ghost_radius_tolerance: float = 0.5
+
+
     # === INTERSECTION FILTERING (auto-computed from r_inner/r_outer) ===
     intersection_r_min: Optional[float] = None
     intersection_r_max: Optional[float] = None
